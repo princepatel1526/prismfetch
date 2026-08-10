@@ -1,0 +1,28 @@
+[package]
+name = "prismfetch"
+version = "1.0.0"
+edition = "2021"
+authors = ["PrismOS Team"]
+description = "A fast, colorful system information tool for PrismOS"
+license = "MIT"
+
+[dependencies]
+sysinfo = "0.30"
+colored = "2.1"
+whoami = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+[package.metadata.deb]
+maintainer = "PrismOS Team <team@prismos.example>"
+copyright = "2026, PrismOS Team"
+extended-description = "prismfetch prints a colorful summary of PrismOS system information, styled after the PrismOS Aurora theme."
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/prismfetch", "usr/bin/", "755"],
+]

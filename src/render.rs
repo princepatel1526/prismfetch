@@ -1,119 +1,294 @@
-use crate::ascii::logo_lines;
+use crate::ascii::{logo_width, LOGO};
 use crate::collector::SystemInfo;
-use colored::{Color, Colorize};
-use whoami::fallible;
+use std::env;
+use std::io::{self, IsTerminal};
 
-const LABEL_COLOR: Color = Color::TrueColor { r: 138, g: 99, b: 246 }; // purple
-const VALUE_COLOR: Color = Color::TrueColor { r: 226, g: 232, b: 240 }; // near-white
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const WHITE: (u8, u8, u8) = (229, 231, 235);
+const GRAY: (u8, u8, u8) = (156, 163, 175);
+const CYAN: (u8, u8, u8) = (41, 213, 255);
+const BLUE: (u8, u8, u8) = (66, 133, 255);
+const INDIGO: (u8, u8, u8) = (99, 102, 241);
+const VIOLET: (u8, u8, u8) = (139, 92, 246);
+const PURPLE: (u8, u8, u8) = (168, 85, 247);
+const MAGENTA: (u8, u8, u8) = (217, 70, 239);
+const PINK: (u8, u8, u8) = (236, 72, 153);
+const ORANGE: (u8, u8, u8) = (245, 158, 11);
+
+struct Terminal {
+    color: bool,
+    unicode: bool,
+    width: usize,
+}
+
+impl Terminal {
+    fn detect() -> Self {
+        let tty = io::stdout().is_terminal();
+        let width = env::var("COLUMNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v >= 20)
+            .or_else(terminal_columns)
+            .unwrap_or(100);
+        let term = env::var("TERM").unwrap_or_default();
+        let locale = env::var("LC_ALL")
+            .or_else(|_| env::var("LC_CTYPE"))
+            .or_else(|_| env::var("LANG"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        Self {
+            color: tty && env::var_os("NO_COLOR").is_none() && term != "dumb",
+            unicode: term != "linux" && (locale.contains("utf-8") || locale.contains("utf8")),
+            width: width.clamp(20, 160),
+        }
+    }
+
+    fn paint(&self, text: &str, color: (u8, u8, u8), bold: bool) -> String {
+        if !self.color {
+            return text.to_string();
+        }
+        format!(
+            "{}\x1b[38;2;{};{};{}m{}{}",
+            if bold { BOLD } else { "" },
+            color.0,
+            color.1,
+            color.2,
+            text,
+            RESET
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_columns() -> Option<usize> {
+    #[repr(C)]
+    struct WinSize {
+        rows: u16,
+        cols: u16,
+        xpixel: u16,
+        ypixel: u16,
+    }
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
+    let mut size = WinSize {
+        rows: 0,
+        cols: 0,
+        xpixel: 0,
+        ypixel: 0,
+    };
+    // TIOCGWINSZ is part of Linux's stable userspace ABI. stdout is fd 1.
+    let result = unsafe { ioctl(1, 0x5413, &mut size) };
+    (result == 0 && size.cols > 0).then_some(size.cols as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn terminal_columns() -> Option<usize> {
+    None
+}
 
 pub fn print_report(info: &SystemInfo) {
-    let user = fallible::username().unwrap_or_else(|_| "user".to_string());
-    let host = fallible::hostname().unwrap_or_else(|_| "prismos".to_string());
+    let t = Terminal::detect();
+    let rows = info_rows(info);
+    let rule = if t.unicode { "─" } else { "-" };
+    println!();
+    println!("{}", t.paint(&rule.repeat(t.width), GRAY, false));
+    if t.width >= 100 {
+        render_side_by_side(&t, &rows);
+    } else {
+        render_stacked(&t, &rows);
+    }
+    println!("{}", t.paint(&rule.repeat(t.width), GRAY, false));
+    render_meters(&t, info);
+    println!();
+}
 
-    let mut right: Vec<String> = Vec::new();
-    right.push(format!(
-        "{}@{}",
-        user.bold().color(Color::TrueColor { r: 56, g: 139, b: 253 }),
-        host.bold().color(Color::TrueColor { r: 217, g: 70, b: 239 })
-    ));
-    right.push("-".repeat(user.len() + host.len() + 1).dimmed().to_string());
-
-    let rows: [(&str, String); 14] = [
-        ("OS", info.os.clone()),
-        ("Kernel", info.kernel.clone()),
-        ("Shell", info.shell.clone()),
-        ("Compositor", info.compositor.clone()),
-        ("Window Manager", info.window_manager.clone()),
-        ("Terminal", info.terminal.clone()),
-        ("CPU", info.cpu.clone()),
-        ("GPU", info.gpu.clone()),
+fn info_rows(info: &SystemInfo) -> Vec<(&'static str, String, (u8, u8, u8))> {
+    vec![
+        ("OS", info.os.clone(), CYAN),
+        ("Kernel", format!("Linux {}", info.kernel), CYAN),
+        ("Shell", info.shell.clone(), CYAN),
+        ("Compositor", info.compositor.clone(), CYAN),
+        ("Window Manager", info.window_manager.clone(), CYAN),
+        ("Terminal", info.terminal.clone(), CYAN),
+        ("CPU", info.cpu.clone(), INDIGO),
+        ("GPU", info.gpu.clone(), PURPLE),
         (
             "RAM",
             format!("{:.1} GB / {:.1} GB", info.ram_used_gb, info.ram_total_gb),
+            PURPLE,
         ),
-        ("Packages", info.packages.to_string()),
-        ("Theme", info.theme.clone()),
-        ("Icons", info.icons.clone()),
-        ("Font", info.font.clone()),
-        ("Uptime", info.uptime.clone()),
-    ];
+        (
+            "Packages",
+            info.packages
+                .map_or_else(|| "N/A".into(), |v| v.to_string()),
+            PURPLE,
+        ),
+        ("Theme", info.theme.clone(), VIOLET),
+        ("Icons", info.icons.clone(), VIOLET),
+        ("Font", info.font.clone(), BLUE),
+        ("Uptime", info.uptime.clone(), BLUE),
+    ]
+}
 
-    for (label, value) in rows {
-        right.push(format!(
-            "{}{} {}",
-            label.color(LABEL_COLOR).bold(),
-            ":".dimmed(),
-            value.color(VALUE_COLOR)
-        ));
-    }
-
-    let logo = logo_lines();
-    let logo_width = 12 * 2; // 12 cells, 2 chars each
-    let total_lines = logo.len().max(right.len());
-
-    println!();
-    for i in 0..total_lines {
-        let left = logo.get(i).cloned().unwrap_or_else(|| " ".repeat(logo_width));
-        let right_line = right.get(i).cloned().unwrap_or_default();
-        println!("  {}   {}", left, right_line);
-    }
-    println!();
-
-    print_bar("CPU Usage", info.cpu_pct, 100.0, format!("{:.0}%", info.cpu_pct), bar_color(info.cpu_pct));
-    print_bar("Memory Usage", info.mem_pct, 100.0, format!("{:.0}%", info.mem_pct), bar_color(info.mem_pct));
-    print_bar(
-        "Disk Usage",
-        info.disk_pct,
-        100.0,
-        format!("{:.0}%", info.disk_pct),
-        bar_color(info.disk_pct),
-    );
-    if info.temp_c > 0.0 {
-        print_bar(
-            "Temperature",
-            info.temp_c,
-            100.0,
-            format!("{:.0}°C", info.temp_c),
-            temp_color(info.temp_c),
+fn render_side_by_side(t: &Terminal, rows: &[(&str, String, (u8, u8, u8))]) {
+    let left_width = logo_width();
+    let divider = if t.unicode { "│" } else { "|" };
+    let logo_offset = (rows.len().saturating_sub(LOGO.len())) / 2;
+    for i in 0..rows.len() {
+        let raw = i
+            .checked_sub(logo_offset)
+            .and_then(|j| LOGO.get(j))
+            .copied()
+            .unwrap_or("");
+        let logo = gradient_logo(t, raw);
+        let padding = " ".repeat(left_width.saturating_sub(raw.chars().count()));
+        let (label, value, color) = &rows[i];
+        let fixed = 1 + left_width + 2 + 3 + label.chars().count() + 2;
+        let value = shorten(value, t.width.saturating_sub(fixed));
+        println!(
+            " {}{}  {}  {} {}",
+            logo,
+            padding,
+            t.paint(divider, GRAY, false),
+            t.paint(&format!("{}:", label), *color, true),
+            t.paint(&value, WHITE, false)
         );
     }
+}
+
+fn render_stacked(t: &Terminal, rows: &[(&str, String, (u8, u8, u8))]) {
+    for line in LOGO {
+        println!(" {}", gradient_logo(t, line.trim_end()));
+    }
     println!();
-}
-
-fn bar_color(pct: f64) -> Color {
-    if pct < 50.0 {
-        Color::TrueColor { r: 56, g: 189, b: 248 } // cyan
-    } else if pct < 80.0 {
-        Color::TrueColor { r: 217, g: 70, b: 239 } // magenta
-    } else {
-        Color::TrueColor { r: 248, g: 113, b: 113 } // red
+    for (label, value, color) in rows {
+        let value = shorten(value, t.width.saturating_sub(label.chars().count() + 4));
+        println!(
+            " {} {}",
+            t.paint(&format!("{}:", label), *color, true),
+            t.paint(&value, WHITE, false)
+        );
     }
 }
 
-fn temp_color(temp: f64) -> Color {
-    if temp < 60.0 {
-        Color::TrueColor { r: 251, g: 191, b: 36 } // amber
-    } else {
-        Color::TrueColor { r: 248, g: 113, b: 113 } // red
+fn shorten(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
     }
+    if width < 2 {
+        return String::new();
+    }
+    let mut text: String = value.chars().take(width - 1).collect();
+    text.push('…');
+    text
 }
 
-fn print_bar(label: &str, value: f64, max: f64, suffix: String, color: Color) {
-    const WIDTH: usize = 30;
-    let ratio = (value / max).clamp(0.0, 1.0);
-    let filled = (ratio * WIDTH as f64).round() as usize;
-    let empty = WIDTH - filled;
+fn gradient_logo(t: &Terminal, line: &str) -> String {
+    let colors = [CYAN, BLUE, INDIGO, VIOLET, PURPLE, MAGENTA, PINK];
+    let width = logo_width().max(1);
+    line.chars()
+        .enumerate()
+        .map(|(i, ch)| {
+            let color = colors[(i * colors.len() / width).min(colors.len() - 1)];
+            t.paint(&ch.to_string(), color, true)
+        })
+        .collect()
+}
 
+fn render_meters(t: &Terminal, info: &SystemInfo) {
+    let temp = if info.temp_c.is_some() {
+        info.temp_c
+    } else {
+        None
+    };
+    meter(
+        t,
+        "CPU Usage",
+        info.cpu_pct,
+        format!("{:.0}%", info.cpu_pct),
+        CYAN,
+        BLUE,
+    );
+    meter(
+        t,
+        "Memory Usage",
+        info.mem_pct,
+        format!("{:.0}%", info.mem_pct),
+        MAGENTA,
+        VIOLET,
+    );
+    meter(
+        t,
+        "Disk Usage",
+        info.disk_pct,
+        format!("{:.0}%", info.disk_pct),
+        (74, 168, 255),
+        BLUE,
+    );
+    meter(
+        t,
+        "Temperature",
+        temp.unwrap_or(0.0),
+        temp.map_or_else(|| "N/A".into(), |v| format!("{v:.0}°C")),
+        ORANGE,
+        (180, 83, 9),
+    );
+}
+
+fn meter(
+    t: &Terminal,
+    label: &str,
+    value: f64,
+    suffix: String,
+    start: (u8, u8, u8),
+    end: (u8, u8, u8),
+) {
+    let label_width = if t.width < 80 { 13 } else { 17 };
+    let suffix_width = 5;
+    let bar_width = t
+        .width
+        .saturating_sub(label_width + suffix_width + 8)
+        .clamp(8, 64);
+    let filled = ((value.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
+    let (full, empty) = if t.unicode {
+        ('█', '░')
+    } else {
+        ('#', '-')
+    };
+    let first = filled / 2;
     let bar = format!(
-        "{}{}",
-        "█".repeat(filled).color(color),
-        "░".repeat(empty).dimmed()
+        "{}{}{}",
+        t.paint(&full.to_string().repeat(first), start, false),
+        t.paint(&full.to_string().repeat(filled - first), end, false),
+        if t.color {
+            format!(
+                "{DIM}{}{RESET}",
+                empty.to_string().repeat(bar_width - filled)
+            )
+        } else {
+            empty.to_string().repeat(bar_width - filled)
+        }
     );
-
     println!(
-        "  {:<14} {}  {}",
-        label.color(VALUE_COLOR),
-        bar,
-        suffix.bold().color(color)
+        " {:<label_width$} [{}] {:>suffix_width$}",
+        label, bar, suffix
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn logo_has_consistent_max_width() {
+        assert!(logo_width() <= 45);
+        assert_eq!(LOGO.len(), 7);
+    }
+    #[test]
+    fn redirected_output_disables_color() {
+        env::set_var("NO_COLOR", "1");
+        assert!(!Terminal::detect().color);
+    }
 }

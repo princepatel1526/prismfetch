@@ -1,7 +1,8 @@
 use std::env;
+use std::ffi::CString;
 use std::fs;
+use std::os::raw::{c_char, c_int, c_ulong};
 use std::process::Command;
-use sysinfo::{Components, Disks, System};
 
 pub struct SystemInfo {
     pub os: String,
@@ -14,266 +15,255 @@ pub struct SystemInfo {
     pub gpu: String,
     pub ram_used_gb: f64,
     pub ram_total_gb: f64,
-    pub packages: usize,
+    pub packages: Option<usize>,
     pub theme: String,
     pub icons: String,
     pub font: String,
     pub uptime: String,
-
     pub cpu_pct: f64,
     pub mem_pct: f64,
     pub disk_pct: f64,
-    pub disk_used_gb: f64,
-    pub disk_total_gb: f64,
-    pub temp_c: f64,
+    pub temp_c: Option<f64>,
 }
 
 impl SystemInfo {
     pub fn collect() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_all();
-        // A second refresh of CPU usage is required because sysinfo needs a
-        // delta between two samples to compute a meaningful percentage.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        sys.refresh_cpu();
-
-        let os = os_pretty_name();
-        let kernel = System::kernel_version().unwrap_or_else(|| "Unknown".to_string());
-        let shell = shell_name();
-        let (compositor, window_manager) = compositor_and_wm();
-        let terminal = terminal_name();
-        let cpu = cpu_name(&sys);
-        let gpu = gpu_name();
-
-        let ram_total_bytes = sys.total_memory();
-        let ram_used_bytes = sys.used_memory();
-        let ram_total_gb = ram_total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
-        let ram_used_gb = ram_used_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
-        let mem_pct = if ram_total_bytes > 0 {
-            ram_used_bytes as f64 / ram_total_bytes as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let packages = package_count();
+        let (ram_used_gb, ram_total_gb, mem_pct) = memory();
         let (theme, icons, font) = appearance_settings();
-        let uptime = format_uptime(System::uptime());
-
-        let cpu_pct = if !sys.cpus().is_empty() {
-            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() as f64 / sys.cpus().len() as f64
-        } else {
-            0.0
-        };
-
-        let (disk_used_gb, disk_total_gb, disk_pct) = disk_usage(&sys);
-        let temp_c = temperature(&sys);
-
-        SystemInfo {
-            os,
-            kernel,
-            shell,
+        let (compositor, window_manager) = compositor_and_wm();
+        Self {
+            os: os_name(),
+            kernel: read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_else(|| "Unknown".into()),
+            shell: env::var("PRISM_SHELL_NAME").unwrap_or_else(|_| "Prism Shell".into()),
             compositor,
             window_manager,
-            terminal,
-            cpu,
-            gpu,
+            terminal: terminal_name(),
+            cpu: cpu_name(),
+            gpu: gpu_name(),
             ram_used_gb,
             ram_total_gb,
-            packages,
+            packages: package_count(),
             theme,
             icons,
             font,
-            uptime,
-            cpu_pct,
+            uptime: uptime(),
+            cpu_pct: cpu_usage(),
             mem_pct,
-            disk_pct,
-            disk_used_gb,
-            disk_total_gb,
-            temp_c,
+            disk_pct: disk_usage(),
+            temp_c: temperature(),
         }
     }
 }
 
-fn os_pretty_name() -> String {
-    if let Ok(contents) = fs::read_to_string("/etc/os-release") {
-        for line in contents.lines() {
-            if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
-                return value.trim_matches('"').to_string();
-            }
-        }
-    }
-    "Unknown Linux".to_string()
-}
-
-fn shell_name() -> String {
-    env::var("SHELL")
+fn read_trimmed(path: &str) -> Option<String> {
+    fs::read_to_string(path)
         .ok()
-        .and_then(|s| s.rsplit('/').next().map(String::from))
-        .unwrap_or_else(|| "unknown".to_string())
+        .map(|s| s.trim().into())
+        .filter(|s: &String| !s.is_empty())
+}
+
+fn os_name() -> String {
+    let release = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let is_prism = release
+        .lines()
+        .any(|l| l == "ID=prismos" || l == "ID=\"prismos\"");
+    if is_prism {
+        release
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("PRETTY_NAME=")
+                    .map(|v| v.trim_matches('"').into())
+            })
+            .unwrap_or_else(|| "PrismOS 1.0 Aurora".into())
+    } else {
+        "PrismOS 1.0 Aurora".into()
+    }
 }
 
 fn compositor_and_wm() -> (String, String) {
-    let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    let desktop = env::var("XDG_CURRENT_DESKTOP")
-        .or_else(|_| env::var("DESKTOP_SESSION"))
-        .unwrap_or_else(|_| "Unknown".to_string());
-
-    let compositor = if session_type.eq_ignore_ascii_case("wayland") {
-        "Wayland".to_string()
-    } else if session_type.eq_ignore_ascii_case("x11") {
-        "X11".to_string()
-    } else {
-        "Unknown".to_string()
-    };
-
-    (compositor, desktop)
+    let compositor = match env::var("XDG_SESSION_TYPE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "x11" => "X11",
+        _ => "Wayland",
+    }
+    .into();
+    let wm = env::var("PRISM_WM_NAME")
+        .or_else(|_| env::var("XDG_CURRENT_DESKTOP"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Prism Shell".into());
+    (compositor, wm)
 }
 
 fn terminal_name() -> String {
-    // Walk: $TERM_PROGRAM -> $TERM -> parent process name via /proc
-    if let Ok(t) = env::var("TERM_PROGRAM") {
-        if !t.is_empty() {
-            return t;
-        }
-    }
-    if let Ok(ppid_name) = fs::read_to_string(format!(
-        "/proc/{}/comm",
-        std::os::unix::process::parent_id()
-    )) {
-        return ppid_name.trim().to_string();
-    }
-    env::var("TERM").unwrap_or_else(|_| "unknown".to_string())
+    env::var("PRISM_TERMINAL_NAME")
+        .or_else(|_| env::var("TERM_PROGRAM"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Prism Terminal".into())
 }
 
-fn cpu_name(sys: &System) -> String {
-    sys.cpus()
-        .first()
-        .map(|c| c.brand().trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Unknown CPU".to_string())
+fn cpu_name() -> String {
+    fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|l| {
+                let (key, value) = l.split_once(':')?;
+                matches!(key.trim(), "model name" | "Hardware").then(|| value.trim().into())
+            })
+        })
+        .unwrap_or_else(|| "Unknown CPU".into())
 }
 
 fn gpu_name() -> String {
-    // Try lspci first (most Linux systems).
-    if let Ok(output) = Command::new("lspci").output() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let lower = line.to_lowercase();
-            if lower.contains("vga") || lower.contains("3d controller") {
-                if let Some(idx) = line.find(": ") {
-                    return line[idx + 2..].trim().to_string();
-                }
-            }
-        }
-    }
-    "Unknown GPU".to_string()
+    Command::new("lspci")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find(|l| {
+                    let l = l.to_ascii_lowercase();
+                    l.contains("vga") || l.contains("3d controller")
+                })
+                .and_then(|l| l.split_once(": ").map(|(_, v)| v.trim().into()))
+        })
+        .unwrap_or_else(|| "Unknown GPU".into())
 }
 
-fn package_count() -> usize {
-    // Try common package managers in order; return the first that works.
-    let managers: [(&str, &[&str]); 5] = [
+fn memory() -> (f64, f64, f64) {
+    let text = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let kb = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let total = kb("MemTotal:");
+    let available = kb("MemAvailable:");
+    let used = total.saturating_sub(available);
+    let gb = 1024.0 * 1024.0;
+    (
+        used as f64 / gb,
+        total as f64 / gb,
+        if total > 0 {
+            used as f64 * 100.0 / total as f64
+        } else {
+            0.0
+        },
+    )
+}
+
+fn package_count() -> Option<usize> {
+    [
+        ("pacman", &["-Qq"][..]),
         ("dpkg-query", &["-f", ".\n", "-W"]),
-        ("pacman", &["-Qq"]),
-        ("rpm", &["-qa"]),
-        ("apk", &["info"]),
-        ("xbps-query", &["-l"]),
-    ];
-    for (cmd, args) in managers {
-        if let Ok(output) = Command::new(cmd).args(args).output() {
-            if output.status.success() {
-                let count = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .count();
-                if count > 0 {
-                    return count;
-                }
-            }
-        }
-    }
-    0
-}
-
-fn appearance_settings() -> (String, String, String) {
-    // Reasonable defaults for PrismOS; real values can be read from
-    // gsettings on GNOME-based sessions if present.
-    let gsettings = |schema: &str, key: &str| -> Option<String> {
-        Command::new("gsettings")
-            .args(["get", schema, key])
+    ]
+    .iter()
+    .find_map(|(cmd, args)| {
+        Command::new(cmd)
+            .args(*args)
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .trim_matches('\'')
-                    .to_string()
-            })
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+            .filter(|n| *n > 0)
+    })
+}
+
+fn appearance_settings() -> (String, String, String) {
+    let setting = |key: &str, default: &str| {
+        env::var(key)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.into())
     };
-
-    let theme = gsettings("org.gnome.desktop.interface", "gtk-theme")
-        .unwrap_or_else(|| "Aurora Glass".to_string());
-    let icons = gsettings("org.gnome.desktop.interface", "icon-theme")
-        .unwrap_or_else(|| "Prism Icons".to_string());
-    let font = gsettings("org.gnome.desktop.interface", "font-name")
-        .unwrap_or_else(|| "Inter".to_string());
-
-    (theme, icons, font)
+    (
+        setting("PRISM_THEME", "Aurora Glass"),
+        setting("PRISM_ICON_THEME", "Prism Icons"),
+        setting("PRISM_FONT", "Inter"),
+    )
 }
 
-fn format_uptime(seconds: u64) -> String {
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    format!("{}h {}m", hours, minutes)
+fn uptime() -> String {
+    let seconds = fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .unwrap_or(0.0) as u64;
+    let days = seconds / 86400;
+    let hours = seconds % 86400 / 3600;
+    let minutes = seconds % 3600 / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else {
+        format!("{hours}h {minutes}m")
+    }
 }
 
-fn disk_usage(_sys: &System) -> (f64, f64, f64) {
-    let disks = Disks::new_with_refreshed_list();
-    let mut best: Option<(u64, u64)> = None; // (total, available)
-    for disk in disks.list() {
-        if disk.mount_point() == std::path::Path::new("/") {
-            best = Some((disk.total_space(), disk.available_space()));
-            break;
+fn cpu_usage() -> f64 {
+    let cores = fs::read_to_string("/proc/cpuinfo")
+        .map(|s| s.lines().filter(|l| l.starts_with("processor")).count())
+        .unwrap_or(1)
+        .max(1);
+    fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .map(|load| (load * 100.0 / cores as f64).clamp(0.0, 100.0))
+        .unwrap_or(0.0)
+}
+
+#[repr(C)]
+struct StatVfs {
+    bsize: c_ulong,
+    frsize: c_ulong,
+    blocks: c_ulong,
+    bfree: c_ulong,
+    bavail: c_ulong,
+    files: c_ulong,
+    ffree: c_ulong,
+    favail: c_ulong,
+    fsid: c_ulong,
+    flag: c_ulong,
+    namemax: c_ulong,
+    spare: [c_int; 6],
+}
+unsafe extern "C" {
+    fn statvfs(path: *const c_char, buf: *mut StatVfs) -> c_int;
+}
+fn disk_usage() -> f64 {
+    let mut stat: StatVfs = unsafe { std::mem::zeroed() };
+    let path = CString::new("/").unwrap();
+    if unsafe { statvfs(path.as_ptr(), &mut stat) } != 0 || stat.blocks == 0 {
+        return 0.0;
+    }
+    ((stat.blocks - stat.bavail) as f64 * 100.0 / stat.blocks as f64).clamp(0.0, 100.0)
+}
+
+fn temperature() -> Option<f64> {
+    let roots = ["/sys/class/thermal", "/sys/class/hwmon"];
+    for root in roots {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let candidates = [path.join("temp"), path.join("temp1_input")];
+                for file in candidates {
+                    if let Ok(raw) = fs::read_to_string(file) {
+                        if let Ok(mut value) = raw.trim().parse::<f64>() {
+                            if value > 1000.0 {
+                                value /= 1000.0;
+                            }
+                            if (1.0..=130.0).contains(&value) {
+                                return Some(value);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    // Fall back to the largest disk found if "/" wasn't matched exactly.
-    let (total, available) = best.unwrap_or_else(|| {
-        disks
-            .list()
-            .iter()
-            .map(|d| (d.total_space(), d.available_space()))
-            .max_by_key(|(t, _)| *t)
-            .unwrap_or((0, 0))
-    });
-
-    let used = total.saturating_sub(available);
-    let total_gb = total as f64 / 1024.0 / 1024.0 / 1024.0;
-    let used_gb = used as f64 / 1024.0 / 1024.0 / 1024.0;
-    let pct = if total > 0 {
-        used as f64 / total as f64 * 100.0
-    } else {
-        0.0
-    };
-    (used_gb, total_gb, pct)
-}
-
-fn temperature(_sys: &System) -> f64 {
-    // Average across CPU-related sensors if available.
-    let components = Components::new_with_refreshed_list();
-    let temps: Vec<f32> = components
-        .list()
-        .iter()
-        .filter(|c| {
-            let label = c.label().to_lowercase();
-            label.contains("cpu") || label.contains("core") || label.contains("package")
-        })
-        .map(|c| c.temperature())
-        .filter(|t| *t > 0.0)
-        .collect();
-
-    if temps.is_empty() {
-        0.0
-    } else {
-        (temps.iter().sum::<f32>() / temps.len() as f32) as f64
-    }
+    None
 }

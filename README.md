@@ -47,18 +47,10 @@ prismfetch/
 
 ## 3. Dependencies (`Cargo.toml`)
 
-- **sysinfo** — CPU/RAM/disk/temperature/uptime/kernel readings
-- **colored** — terminal color/formatting
-- **whoami** — username + hostname
-
-These are pulled automatically from crates.io the first time you build;
-no manual download needed as long as the machine has internet access.
-
-> Note: if you're building on an older distro whose system `rustc` is below
-> 1.80, pin these two transitive crates (already reflected correctly by
-> `cargo build` resolving compatible versions automatically on a normal,
-> up-to-date system — this only matters on very old toolchains):
-> `cargo update -p rayon --precise 1.10.0 && cargo update -p rayon-core --precise 1.12.1`
+PrismFetch has **no runtime or third-party Rust dependencies**. It reads Linux
+`/proc` and `/sys` interfaces directly, with small libc calls for terminal and
+disk size. `lspci` is optional and improves GPU identification; `pacman` or
+`dpkg-query` is optional and supplies the package count.
 
 ## 4. Build
 
@@ -124,8 +116,7 @@ prismfetch
 - **Logo** — edit the `LOGO` grid and the `BLUE` / `MAGENTA` / `PURPLE`
   `TrueColor` values in `src/ascii.rs`.
 - **Fields shown** — edit the `rows` array in `src/render.rs`.
-- **Bar colors / width** — edit `bar_color()`, `temp_color()`, and `WIDTH`
-  in `src/render.rs`.
+- **Bar colors / width** — edit the palette and `meter()` in `src/render.rs`.
 - **OS name** — `collector.rs` reads `PRETTY_NAME` from `/etc/os-release`,
   so set that file correctly when you build your PrismOS root filesystem,
   e.g.:
@@ -140,19 +131,32 @@ prismfetch
 | Field | Source |
 |---|---|
 | OS | `/etc/os-release` → `PRETTY_NAME` |
-| Kernel | `sysinfo::System::kernel_version()` (= `uname -r`) |
-| Shell | `$SHELL` env var |
+| Kernel | `/proc/sys/kernel/osrelease` |
+| Shell | `PRISM_SHELL_NAME`, else Prism Shell |
 | Compositor / Window Manager | `$XDG_SESSION_TYPE` / `$XDG_CURRENT_DESKTOP` |
-| Terminal | `$TERM_PROGRAM`, falling back to the parent process name |
-| CPU | `sysinfo` CPU brand string |
+| Terminal | `PRISM_TERMINAL_NAME` / `$TERM_PROGRAM`, else Prism Terminal |
+| CPU | `/proc/cpuinfo` |
 | GPU | `lspci` output, first VGA/3D controller line |
-| RAM | `sysinfo` total/used memory |
-| Packages | tries `dpkg-query`, `pacman`, `rpm`, `apk`, `xbps-query` in order |
-| Theme / Icons / Font | `gsettings` (GNOME-based sessions), else PrismOS defaults |
-| Uptime | `sysinfo::System::uptime()` |
-| CPU/Mem/Disk/Temp bars | `sysinfo` live readings |
+| RAM | `/proc/meminfo` |
+| Packages | `pacman -Qq`, then `dpkg-query`; otherwise N/A |
+| Theme / Icons / Font | `PRISM_THEME`, `PRISM_ICON_THEME`, `PRISM_FONT`, else PrismOS defaults |
+| Uptime | `/proc/uptime` |
+| CPU/Mem/Disk/Temp bars | `/proc/loadavg`, `/proc/meminfo`, `statvfs`, `/sys` thermal sensors |
 
-This was built and test-compiled against Rust 1.75 / sysinfo 0.30 to confirm
-it builds cleanly — you should still run `cargo build --release` yourself on
+This utility is dependency-free and builds with the stable Rust toolchain — you should still run `cargo build --release` yourself on
 your target machine before packaging, since GPU/theme detection depends on
 what's actually installed there.
+
+
+## Layout and terminal behavior
+
+PrismFetch reads the terminal width from `$COLUMNS` or the Linux terminal ioctl.
+At 100 columns and above it uses the side-by-side reference layout; below 100 it
+uses a stacked layout that cannot wrap. Set `NO_COLOR=1`, use `TERM=dumb`, or
+redirect stdout to disable ANSI styling. Linux virtual consoles use an ASCII
+fallback for rules and meters; UTF-8 terminal emulators get block graphics and
+24-bit Aurora colors.
+
+PrismOS branding can be supplied by `/etc/os-release`; session branding can be
+overridden with `PRISM_SHELL_NAME`, `PRISM_WM_NAME`, `PRISM_TERMINAL_NAME`,
+`PRISM_THEME`, `PRISM_ICON_THEME`, and `PRISM_FONT`.

@@ -7,9 +7,6 @@ description = "A fast, colorful system information tool for PrismOS"
 license = "MIT"
 
 [dependencies]
-sysinfo = "0.30"
-colored = "2.1"
-whoami = "1.5"
 
 [profile.release]
 opt-level = 3

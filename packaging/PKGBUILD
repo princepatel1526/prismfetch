@@ -1,0 +1,30 @@
+# Maintainer: PrismOS Team <team@prismos.example>
+pkgname=prismfetch
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A fast, colorful system information tool for PrismOS"
+arch=('x86_64' 'aarch64')
+url="https://github.com/prismos/prismfetch"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')  # replace with `sha256sum` output when you publish
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --release --locked
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}
